@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Extendable Order and Payment Management API
 
 Laravel 11 REST API for orders and pluggable payment gateways. Order totals are calculated on the server. A new payment method is a gateway class plus configuration, with no changes to controllers, services, or validation.
@@ -192,3 +193,6 @@ The charged amount is the order total.
 - Credit card and PayPal gateways are deterministic simulators. Env credentials are injected for a future live integration and are not sent to a third party.
 - JWT blacklist uses the cache. Local `.env` uses the `file` cache so logout and refresh invalidate tokens without a cache table. Tests use the `array` cache.
 - The application database is MySQL. PHPUnit forces SQLite `:memory:`.
+=======
+# task-payment-api
+>>>>>>> dcff6a2efc511e130e92a375380293689cc75d0e
