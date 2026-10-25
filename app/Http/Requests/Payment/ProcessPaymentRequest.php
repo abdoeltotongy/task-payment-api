@@ -23,10 +23,24 @@ final class ProcessPaymentRequest extends FormRequest
      */
     public function rules(): array
     {
-        return [
-            'method' => ['required', 'string', Rule::in($this->enabledMethods())],
+        $enabledMethods = $this->enabledMethods();
+
+        $rules = [
+            'method' => ['required', 'string', Rule::in($enabledMethods)],
             'data' => ['sometimes', 'array'],
         ];
+
+        $method = $this->input('method');
+
+        if (! is_string($method) || ! in_array($method, $enabledMethods, true)) {
+            return $rules;
+        }
+
+        foreach (app(PaymentGatewayManager::class)->driver($method)->rules() as $field => $fieldRules) {
+            $rules['data.'.$field] = $fieldRules;
+        }
+
+        return $rules;
     }
 
     /**

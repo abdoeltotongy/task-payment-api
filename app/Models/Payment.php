@@ -22,9 +22,17 @@ class Payment extends Model
         'order_id',
         'method',
         'status',
+        'is_successful',
         'amount',
         'transaction_id',
         'gateway_response',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    protected $hidden = [
+        'is_successful',
     ];
 
     /**
@@ -34,9 +42,29 @@ class Payment extends Model
     {
         return [
             'status' => PaymentStatus::class,
+            'is_successful' => 'boolean',
             'amount' => 'decimal:2',
             'gateway_response' => 'array',
         ];
+    }
+
+    /**
+     * Store the outcome of a payment attempt.
+     * `is_successful` is true only for an approved payment so the unique index allows one success per order.
+     *
+     * @param  array<string, mixed>  $raw
+     */
+    public function settle(bool $approved, ?string $transactionId, string $message, array $raw = []): void
+    {
+        $this->forceFill([
+            'status' => $approved ? PaymentStatus::Successful : PaymentStatus::Failed,
+            'is_successful' => $approved ? true : null,
+            'transaction_id' => $transactionId,
+            'gateway_response' => [
+                'message' => $message,
+                'raw' => $raw,
+            ],
+        ])->save();
     }
 
     public function order(): BelongsTo

@@ -15,6 +15,11 @@ final class FakePaymentGateway implements PaymentGatewayInterface
      */
     public function __construct(private readonly array $config = []) {}
 
+    public function rules(): array
+    {
+        return [];
+    }
+
     public function process(Payment $payment, array $data = []): GatewayResult
     {
         return new GatewayResult(

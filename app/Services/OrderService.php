@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
 use App\Exceptions\InvalidOrderStatusTransitionException;
 use App\Exceptions\OrderHasPaymentsException;
 use App\Models\Order;
@@ -62,8 +63,8 @@ final class OrderService
         return DB::transaction(function () use ($order, $data): Order {
             $locked = Order::query()->lockForUpdate()->findOrFail($order->id);
 
-            if (array_key_exists('items', $data) && $locked->hasSuccessfulPayment()) {
-                throw new OrderHasPaymentsException('Order items cannot be changed after a successful payment.');
+            if (array_key_exists('items', $data)) {
+                $this->ensureItemsCanChange($locked);
             }
 
             if (array_key_exists('notes', $data)) {
@@ -83,25 +84,56 @@ final class OrderService
 
     public function updateStatus(Order $order, OrderStatus $status): Order
     {
-        if (! $this->canTransition($order->status, $status)) {
-            throw new InvalidOrderStatusTransitionException(
-                "Cannot change order status from {$order->status->value} to {$status->value}.",
-            );
-        }
+        return DB::transaction(function () use ($order, $status): Order {
+            $locked = Order::query()->whereKey($order->id)->lockForUpdate()->firstOrFail();
 
-        $order->status = $status;
-        $order->save();
+            if (! $this->canTransition($locked->status, $status)) {
+                throw new InvalidOrderStatusTransitionException(
+                    "Cannot change order status from {$locked->status->value} to {$status->value}.",
+                );
+            }
 
-        return $order->load('items');
+            if ($status === OrderStatus::Cancelled && $locked->hasSuccessfulPayment()) {
+                throw new InvalidOrderStatusTransitionException('A paid order cannot be cancelled.');
+            }
+
+            $locked->status = $status;
+            $locked->save();
+
+            return $locked->load('items');
+        });
     }
 
     public function delete(Order $order): void
     {
-        if ($order->payments()->exists()) {
-            throw new OrderHasPaymentsException('Orders with payments cannot be deleted.');
+        DB::transaction(function () use ($order): void {
+            $locked = Order::query()->whereKey($order->id)->lockForUpdate()->first();
+
+            if ($locked === null) {
+                return;
+            }
+
+            if ($locked->payments()->exists()) {
+                throw new OrderHasPaymentsException('Orders with payments cannot be deleted.');
+            }
+
+            $locked->delete();
+        });
+    }
+
+    /**
+     * A pending payment has already snapshotted the total, so the lines cannot move underneath it.
+     * A successful payment has settled that total.
+     */
+    private function ensureItemsCanChange(Order $order): void
+    {
+        if ($order->hasSuccessfulPayment()) {
+            throw new OrderHasPaymentsException('Order items cannot be changed after a successful payment.');
         }
 
-        $order->delete();
+        if ($order->payments()->where('status', PaymentStatus::Pending)->exists()) {
+            throw new OrderHasPaymentsException('Order items cannot be changed while a payment is in progress.');
+        }
     }
 
     private function canTransition(OrderStatus $from, OrderStatus $to): bool

@@ -35,6 +35,7 @@ class PaymentFactory extends Factory
     {
         return $this->state(fn (): array => [
             'status' => PaymentStatus::Successful,
+            'is_successful' => true,
             'transaction_id' => 'txn_'.fake()->unique()->numerify('######'),
             'gateway_response' => ['message' => 'Payment approved.'],
         ]);

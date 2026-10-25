@@ -33,3 +33,14 @@ it('declines a paypal account whose email contains fail', function () {
         ->and($result->transactionId)->toBeNull()
         ->and($result->message)->toBe('PayPal payment declined.');
 });
+
+it('does not approve a missing paypal email', function () {
+    $payment = new Payment;
+    $payment->id = 9;
+
+    $result = (new PayPalGateway)->process($payment, []);
+
+    expect($result->success)->toBeFalse()
+        ->and($result->transactionId)->toBeNull()
+        ->and($result->message)->toBe('PayPal details are invalid.');
+});

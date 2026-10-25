@@ -34,3 +34,15 @@ it('declines a card that ends in 0000', function () {
         ->and($result->transactionId)->toBeNull()
         ->and($result->message)->toBe('Card declined.');
 });
+
+it('does not approve a missing card number', function () {
+    $payment = new Payment;
+    $payment->id = 12;
+
+    $result = (new CreditCardGateway)->process($payment, []);
+
+    expect($result->success)->toBeFalse()
+        ->and($result->transactionId)->toBeNull()
+        ->and($result->message)->toBe('Card details are invalid.')
+        ->and($result->raw)->toBe([]);
+});

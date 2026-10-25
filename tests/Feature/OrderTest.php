@@ -195,3 +195,72 @@ it('returns 409 when deleting an order that has payments', function () {
 
     $this->assertDatabaseHas('orders', ['id' => $order->id]);
 });
+
+it('rejects an invalid status transition and cancellation of a paid order', function () {
+    $user = User::factory()->create();
+    $cancelled = Order::factory()->cancelled()->create(['user_id' => $user->id]);
+
+    $this->patchJson('/api/orders/'.$cancelled->id.'/status', ['status' => 'confirmed'], asUser($user))
+        ->assertStatus(409)
+        ->assertJsonStructure(['message', 'errors']);
+
+    $paid = Order::factory()->confirmed()->create(['user_id' => $user->id, 'total_amount' => '20.00']);
+    Payment::factory()->successful()->create(['order_id' => $paid->id, 'amount' => '20.00']);
+
+    $this->patchJson('/api/orders/'.$paid->id.'/status', ['status' => 'cancelled'], asUser($user))
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'A paid order cannot be cancelled.');
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $paid->id,
+        'status' => 'confirmed',
+    ]);
+
+    $failed = Order::factory()->confirmed()->create(['user_id' => $user->id]);
+    Payment::factory()->failed()->create(['order_id' => $failed->id]);
+
+    $this->patchJson('/api/orders/'.$failed->id.'/status', ['status' => 'cancelled'], asUser($user))
+        ->assertOk()
+        ->assertJsonPath('data.status', 'cancelled');
+});
+
+it('blocks item changes while a payment is pending', function () {
+    $user = User::factory()->create();
+    $order = Order::factory()->confirmed()->create(['user_id' => $user->id, 'total_amount' => '20.00']);
+    Payment::factory()->create(['order_id' => $order->id, 'status' => 'pending', 'amount' => '20.00']);
+
+    $this->putJson('/api/orders/'.$order->id, [
+        'items' => [
+            ['product_name' => 'Cement', 'quantity' => 1, 'price' => '5.00'],
+        ],
+    ], asUser($user))
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'Order items cannot be changed while a payment is in progress.');
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'total_amount' => '20.00',
+    ]);
+});
+
+it('calculates awkward cent totals and rejects extra decimal places', function () {
+    $user = User::factory()->create();
+
+    $this->postJson('/api/orders', [
+        'items' => [
+            ['product_name' => 'Nails', 'quantity' => 3, 'price' => '0.10'],
+            ['product_name' => 'Rebar', 'quantity' => 1, 'price' => '19.99'],
+        ],
+        'total_amount' => '1.00',
+    ], asUser($user))
+        ->assertCreated()
+        ->assertJsonPath('data.total_amount', '20.29');
+
+    $this->postJson('/api/orders', [
+        'items' => [
+            ['product_name' => 'Nails', 'quantity' => 1, 'price' => '1.005'],
+        ],
+    ], asUser($user))
+        ->assertUnprocessable()
+        ->assertJsonStructure(['message', 'errors' => ['items.0.price']]);
+});

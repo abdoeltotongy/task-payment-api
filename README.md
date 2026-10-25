@@ -1,11 +1,10 @@
-<<<<<<< HEAD
 # Extendable Order and Payment Management API
 
-Laravel 11 REST API for orders and pluggable payment gateways. Order totals are calculated on the server. A new payment method is a gateway class plus configuration, with no changes to controllers, services, or validation.
+Laravel 11 REST API for orders and pluggable payment gateways. Order totals are calculated on the server in integer cents. A new payment method is a gateway class plus configuration. Controllers and `PaymentService` do not need gateway-specific conditions.
 
 ## Setup
 
-Requirements: PHP 8.2+, Composer, and MySQL. Tests use SQLite.
+Requirements: PHP 8.2+, Composer, and MySQL. Tests use SQLite in memory.
 
 ```bash
 composer install
@@ -21,6 +20,8 @@ php artisan migrate --seed
 php artisan serve
 ```
 
+`php artisan jwt:secret` writes `JWT_SECRET`. Leave the payment credential values empty. Credit card and PayPal are simulators and do not call an external provider.
+
 Demo accounts created by the seeder:
 
 | Email | Password |
@@ -28,7 +29,7 @@ Demo accounts created by the seeder:
 | demo@example.com | password |
 | other@example.com | password |
 
-`demo@example.com` owns pending, paid, declined, and cancelled orders. `other@example.com` owns a separate order.
+`demo@example.com` owns a pending order, a confirmed order with a successful card payment, confirmed orders with declined card and PayPal payments, and a cancelled order. `other@example.com` owns a separate pending order.
 
 Run the tests and formatter:
 
@@ -54,21 +55,30 @@ HTTP request
 - Controllers stay thin. Business rules live in `OrderService` and `PaymentService`.
 - `OrderStatus` and `PaymentStatus` are backed enums.
 - Users can only reach their own orders and payments through `OrderPolicy` and `PaymentPolicy`.
-- API errors use `{"message": "...", "errors": {...}}` with 401, 403, 404, 409, and 422.
-- Payment methods are not hardcoded. `ProcessPaymentRequest` allows only the enabled keys in `config/payment.php`. `PaymentGatewayManager` resolves the matching class from the container.
+- API errors use `{"message": "...", "errors": {...}}` with 401, 403, 404, 409, 422, and 500.
+- Unexpected server errors are logged by exception class and returned as `Server error.` The response does not include a stack trace or the original exception text.
+- Payment methods are not hardcoded. `ProcessPaymentRequest` allows enabled keys from `config/payment.php` and merges that gateway's `rules()`. `PaymentGatewayManager` resolves the class from the container.
 
 ### Payment flow
 
-1. The order must belong to the user and be `confirmed`, otherwise `OrderNotConfirmedException` (422). The policy returns 403 before that when the order belongs to someone else.
-2. A successful payment already on the order raises `PaymentAlreadyProcessedException` (409).
-3. A database transaction creates a `pending` payment for the server-calculated order total.
-4. The manager calls `PaymentGatewayInterface::process()`.
-5. The payment becomes `successful` or `failed`, and stores `transaction_id` and `gateway_response`.
+1. The order must belong to the user. Someone else's order returns 403.
+2. Gateway `rules()` validate `data`. Missing or invalid provider fields return Laravel's 422 response and no payment row is created.
+3. A short database transaction locks the order. The order must be `confirmed`, otherwise `OrderNotConfirmedException` (422). An existing successful payment raises `PaymentAlreadyProcessedException` (409). The transaction then stores a `pending` payment for the server-calculated total and commits.
+4. The manager calls `PaymentGatewayInterface::process()` after the lock is released.
+5. A second short transaction stores the outcome:
+   - Provider approval becomes `successful` and returns 201.
+   - Provider decline becomes `failed` and returns 201. A failed attempt can be retried.
+   - If the order was cancelled, or another payment succeeded, this attempt is stored as `failed` and the API returns 422 or 409. It is not reported as successful.
+6. If the gateway throws, the attempt is stored as `failed`, the exception class is logged without the provider payload, and the API returns 500 with `The payment provider could not complete the payment.`
+
+`pending` means the provider has not answered yet. A finished request does not return `pending`.
 
 Simulated rules:
 
-- Credit card: `data.card_number` ending in `0000` is declined.
-- PayPal: `data.email` containing `fail` is declined.
+- Credit card: `data.card_number` is 13 to 19 digits. A number ending in `0000` is declined. Only the last four digits are stored.
+- PayPal: `data.email` must be an email address. An address containing `fail` is declined.
+
+These gateways do not send the configured merchant id, API key, client id, or client secret anywhere.
 
 ## How to add a new payment gateway
 
@@ -76,7 +86,7 @@ Simulated rules:
 2. Add one entry under `gateways` in `config/payment.php`.
 3. Add the env keys that entry reads.
 
-No controller, service, or validation change is required. `Rule::in(...)` reads the enabled gateway keys at request time.
+No controller, `PaymentService`, or shared validation class change is required. The form request reads `rules()` from the resolved gateway. A test can also call `PaymentGatewayManager::extend()` without editing config files.
 
 ```php
 <?php
@@ -96,15 +106,21 @@ final class BankTransferGateway implements PaymentGatewayInterface
      */
     public function __construct(private readonly array $config = []) {}
 
+    public function rules(): array
+    {
+        return [
+            'reference' => ['required', 'string', 'min:3', 'max:40'],
+        ];
+    }
+
     public function process(Payment $payment, array $data = []): GatewayResult
     {
         $reference = (string) ($data['reference'] ?? '');
-        $declined = $reference === '';
 
         return new GatewayResult(
-            success: ! $declined,
-            transactionId: $declined ? null : 'bt_'.$payment->id,
-            message: $declined ? 'Transfer reference is required.' : 'Transfer accepted.',
+            success: true,
+            transactionId: 'bt_'.$payment->id,
+            message: 'Transfer accepted.',
             raw: [
                 'reference' => $reference,
                 'bank_name' => $this->config['bank_name'] ?? null,
@@ -131,7 +147,7 @@ PAYMENT_BANK_TRANSFER_BANK_NAME=
 PAYMENT_BANK_TRANSFER_ACCOUNT_NUMBER=
 ```
 
-`POST /api/orders/{order}/payments` then accepts `"method": "bank_transfer"`. A runtime test can also call `PaymentGatewayManager::extend()` without editing config files.
+`POST /api/orders/{order}/payments` then accepts `"method": "bank_transfer"` with `data.reference`. An empty reference returns 422 before a payment row is created.
 
 ## Endpoints
 
@@ -168,7 +184,7 @@ Create order body:
 }
 ```
 
-`total_amount` sent by the client is ignored. The stored total is the sum of `quantity * price`.
+`total_amount` sent by the client is ignored. The stored total is the sum of `quantity * price`, calculated in cents.
 
 Payment body:
 
@@ -179,20 +195,20 @@ Payment body:
 }
 ```
 
-The charged amount is the order total.
+The charged amount is the order total at the moment the attempt starts.
 
 ## Assumptions
 
-- One successful payment is allowed per order. A failed attempt can be retried.
-- The charged amount is always the current order total, never a client-supplied amount.
-- Orders are created as `pending`. `pending` can become `confirmed` or `cancelled`. `confirmed` can become `cancelled`. Other transitions return 409.
-- Any payment, including a failed one, blocks deletion with 409.
-- Item changes are blocked only after a successful payment. Notes can still be updated.
+- One successful payment is allowed per order. The payments table enforces this with a unique `(order_id, is_successful)` index. `is_successful` is true only for an approved payment and null otherwise, so failed attempts do not collide. The column is not part of the API response.
+- The charged amount is always the order total captured when the attempt starts, never a client-supplied amount.
+- Orders are created as `pending`. `pending` can become `confirmed` or `cancelled`. `confirmed` can become `cancelled` only when the order has no successful payment. Other transitions return 409.
+- Cancelling a paid order returns 409 with `A paid order cannot be cancelled.` There is no refund flow, so a successful payment is not reversed by a status change.
+- Any payment, including a failed or pending one, blocks deletion with 409. The foreign key also restricts deleting an order that still has payments. Deletion locks the order row so it cannot race with payment creation.
+- Item changes are blocked after a successful payment and while a payment is still `pending`, because that attempt already snapshotted the total. Notes can still be updated.
 - Another user's order or payment returns 403. An unknown id returns 404.
-- Gateway failures still create a payment row and return 201 with `status: failed`.
+- A gateway decline still creates a payment row and returns 201 with `status: failed`.
+- A gateway exception does not return 201. The row is stored as `failed` and the response is 500.
 - Credit card and PayPal gateways are deterministic simulators. Env credentials are injected for a future live integration and are not sent to a third party.
 - JWT blacklist uses the cache. Local `.env` uses the `file` cache so logout and refresh invalidate tokens without a cache table. Tests use the `array` cache.
 - The application database is MySQL. PHPUnit forces SQLite `:memory:`.
-=======
-# task-payment-api
->>>>>>> dcff6a2efc511e130e92a375380293689cc75d0e
+- Status values are database enums. Non-negative prices and totals are enforced by validation and integer-cent arithmetic. This Laravel schema builder has no portable `CHECK` helper, so amount floors are not separate database checks.

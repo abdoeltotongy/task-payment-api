@@ -9,6 +9,7 @@ use Illuminate\Auth\AuthenticationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use PHPOpenSourceSaver\JWTAuth\Exceptions\JWTException;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
@@ -90,6 +91,14 @@ final class ApiExceptionRenderer
             ];
         }
 
+        if ($exception instanceof PaymentProviderException) {
+            return [
+                JsonResponse::HTTP_INTERNAL_SERVER_ERROR,
+                $this->message($exception, 'The payment provider could not complete the payment.'),
+                [],
+            ];
+        }
+
         if ($exception instanceof HttpExceptionInterface) {
             return [
                 $exception->getStatusCode(),
@@ -98,13 +107,13 @@ final class ApiExceptionRenderer
             ];
         }
 
-        $message = config('app.debug') === true
-            ? $exception->getMessage()
-            : 'Server error.';
+        Log::error('API request failed.', [
+            'exception' => $exception::class,
+        ]);
 
         return [
             JsonResponse::HTTP_INTERNAL_SERVER_ERROR,
-            $message !== '' ? $message : 'Server error.',
+            'Server error.',
             [],
         ];
     }

@@ -8,17 +8,40 @@ use App\Models\Payment;
 use App\Payments\Contracts\PaymentGatewayInterface;
 use App\Payments\DTOs\GatewayResult;
 
+/**
+ * Simulated PayPal gateway. No request is sent to PayPal.
+ * An email containing "fail" is declined. Any other valid email is approved.
+ */
 final class PayPalGateway implements PaymentGatewayInterface
 {
     /**
      * @param  array<string, mixed>  $config
      */
-    public function __construct(private readonly array $config = []) {}
+    public function __construct(private readonly array $config = [])
+    {
+        // Simulator only. Provider credentials are injected here and are not sent anywhere.
+    }
+
+    public function rules(): array
+    {
+        return [
+            'email' => ['required', 'string', 'email', 'max:255'],
+        ];
+    }
 
     public function process(Payment $payment, array $data = []): GatewayResult
     {
-        $email = (string) ($data['email'] ?? '');
-        $declined = str_contains($email, 'fail');
+        $email = $data['email'] ?? '';
+
+        if (! is_string($email) || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+            return new GatewayResult(
+                success: false,
+                transactionId: null,
+                message: 'PayPal details are invalid.',
+            );
+        }
+
+        $declined = str_contains(strtolower($email), 'fail');
 
         return new GatewayResult(
             success: ! $declined,
